@@ -1,0 +1,283 @@
+# linux/arm/v7 image of Papra.
+#
+# Official Node 26 images do not ship linux/arm/v7 (support is experimental as of
+# Node 24). This Dockerfile uses Debian Trixie throughout and builds Node 26 from
+# source for armhf, then compiles Papra on the build host and installs native
+# modules on the target.
+#
+# Build:
+#   docker buildx build --platform linux/arm/v7 \
+#     --target papra-rootless \
+#     -f packages/app/Dockerfile.armv7 \
+#     --build-arg PAPRA_VERSION=26.6.1 \
+#     -t ghcr.io/ts-228/papra:26.6.1-armv7 .
+
+# syntax=docker/dockerfile:1
+
+ARG DEBIAN_IMAGE=debian:trixie-slim
+ARG DEBIAN_BUILD_IMAGE=debian:trixie
+ARG NODE_VERSION=26.7.0
+ARG PNPM_VERSION=11.1.1
+
+# -----------------------------------------------------------------------------
+# Cross-compile Node 26 for linux/arm/v7 (armhf) on the build host.
+# V8 snapshots for 32-bit ARM must be generated with 32-bit host tools.
+# -----------------------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM ${DEBIAN_BUILD_IMAGE} AS node-armv7-build
+ARG NODE_VERSION
+
+# gcc-arm-linux-gnueabihf conflicts with gcc-multilib on Debian Trixie, so
+# 32-bit V8 host tools are built with the i686 cross compiler instead of gcc -m32.
+# i386 libs are required to run those host snapshot tools on the amd64 builder.
+# Node 26 Temporal (temporal_capi) needs rustc/cargo >= 1.86; Trixie's rustc is
+# 1.85, so install rustup. Host snapshot tools are i686, the Node binary is armhf.
+RUN dpkg --add-architecture i386 \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gcc \
+        g++ \
+        gcc-arm-linux-gnueabihf \
+        g++-arm-linux-gnueabihf \
+        gcc-i686-linux-gnu \
+        g++-i686-linux-gnu \
+        libc6:i386 \
+        libstdc++6:i386 \
+        zlib1g:i386 \
+        make \
+        pkg-config \
+        python3 \
+        python-is-python3 \
+        xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.cargo/bin:${PATH}" \
+    CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc \
+    CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER=i686-linux-gnu-gcc
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain stable \
+    && rustup target add i686-unknown-linux-gnu arm-unknown-linux-gnueabihf \
+    && printf '%s\n' \
+        '[target.arm-unknown-linux-gnueabihf]' \
+        'linker = "arm-linux-gnueabihf-gcc"' \
+        '' \
+        '[target.i686-unknown-linux-gnu]' \
+        'linker = "i686-linux-gnu-gcc"' \
+        >> /root/.cargo/config.toml \
+    && rustc --version && cargo --version
+
+WORKDIR /tmp/node
+
+COPY packages/app/docker/patch-node-crates-cross.py /tmp/patch-node-crates-cross.py
+COPY packages/app/docker/build-node-crates.sh /usr/local/bin/build-node-crates.sh
+COPY packages/app/docker/fix-node-crates-makefiles.py /tmp/fix-node-crates-makefiles.py
+RUN chmod +x /usr/local/bin/build-node-crates.sh
+
+RUN curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.xz" \
+    && tar -xJf "node-v${NODE_VERSION}.tar.xz" --strip-components=1 \
+    && rm "node-v${NODE_VERSION}.tar.xz" \
+    && python3 /tmp/patch-node-crates-cross.py /tmp/node/deps/crates/crates.gyp
+
+RUN export CC=arm-linux-gnueabihf-gcc \
+        CXX=arm-linux-gnueabihf-g++ \
+        CC_host=i686-linux-gnu-gcc \
+        CXX_host=i686-linux-gnu-g++ \
+        AR=arm-linux-gnueabihf-ar \
+        RANLIB=arm-linux-gnueabihf-ranlib \
+    && ./configure \
+        --prefix=/usr/local \
+        --dest-cpu=arm \
+        --dest-os=linux \
+        --cross-compiling \
+        --with-arm-float-abi=hard \
+        --openssl-no-asm \
+        --v8-enable-temporal-support \
+    && grep -E "v8_enable_temporal_support" config.gypi \
+    && python3 /tmp/fix-node-crates-makefiles.py /tmp/node/out
+
+RUN export CC=arm-linux-gnueabihf-gcc \
+        CXX=arm-linux-gnueabihf-g++ \
+        CC_host=i686-linux-gnu-gcc \
+        CXX_host=i686-linux-gnu-g++ \
+        AR=arm-linux-gnueabihf-ar \
+        RANLIB=arm-linux-gnueabihf-ranlib \
+    && make -j"$(nproc)"
+
+RUN make install DESTDIR=/node-armv7
+RUN arm-linux-gnueabihf-strip /node-armv7/usr/local/bin/node
+
+
+# -----------------------------------------------------------------------------
+# Official linux-x64 Node 26 on Debian Trixie, used only to compile Papra JS.
+# -----------------------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM ${DEBIAN_IMAGE} AS node-host
+ARG NODE_VERSION
+ARG PNPM_VERSION
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl xz-utils libatomic1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+        | tar -xJ -C /usr/local --strip-components=1 \
+    && npm install -g "pnpm@${PNPM_VERSION}"
+
+# -----------------------------------------------------------------------------
+# Compile Papra (client + server) on the build host.
+# -----------------------------------------------------------------------------
+FROM node-host AS papra-build
+
+WORKDIR /app
+
+COPY pnpm-lock.yaml ./
+COPY pnpm-workspace.yaml ./
+COPY apps/papra-client/package.json apps/papra-client/package.json
+COPY apps/papra-server/package.json apps/papra-server/package.json
+COPY packages/webhooks/package.json packages/webhooks/package.json
+COPY packages/lecture/package.json packages/lecture/package.json
+COPY packages/std/package.json packages/std/package.json
+COPY packages/search-parser/package.json packages/search-parser/package.json
+
+RUN pnpm install --frozen-lockfile --ignore-scripts
+
+COPY . .
+
+RUN pnpm --filter "@papra/app-client..." run build \
+    && pnpm --filter "@papra/app-server..." run build
+
+# Drop host-arch node_modules so the target stage can install armv7 natives.
+RUN rm -rf node_modules \
+        apps/*/node_modules \
+        packages/*/node_modules \
+        packages/*/demo/node_modules
+
+# -----------------------------------------------------------------------------
+# Debian Trixie armv7 runtime with the Node 26 we built from source.
+# -----------------------------------------------------------------------------
+FROM ${DEBIAN_IMAGE} AS runtime-base
+ARG PNPM_VERSION
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libatomic1 \
+        libstdc++6 \
+        python3 \
+        make \
+        g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=node-armv7-build /node-armv7/usr/local /usr/local
+
+RUN npm install -g "pnpm@${PNPM_VERSION}"
+
+# -----------------------------------------------------------------------------
+# Install production deps (including native addons) for linux/arm/v7.
+# -----------------------------------------------------------------------------
+FROM runtime-base AS papra-deploy
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+COPY --from=papra-build /app /app
+
+# libsql 0.4.x (pulled by @libsql/client) has no linux-arm-gnueabihf binary and a
+# different native ABI. Install 0.5.29 outside the workspace (catalog: protocol
+# breaks npm install in the deployed tree) so JS and the armv7 addon match.
+RUN pnpm install --frozen-lockfile --filter="@papra/app-server..." \
+    && pnpm deploy --filter=@papra/app-server --legacy --prod /prod/papra-server \
+    && mkdir -p /tmp/libsql-arm \
+    && cd /tmp/libsql-arm \
+    && npm init -y \
+    && npm install --omit=dev libsql@0.5.29 @libsql/linux-arm-gnueabihf@0.5.29 \
+    && rm -rf /prod/papra-server/node_modules/libsql \
+              /prod/papra-server/node_modules/@libsql/linux-arm-gnueabihf \
+    && cp -a node_modules/libsql /prod/papra-server/node_modules/libsql \
+    && mkdir -p /prod/papra-server/node_modules/@libsql \
+    && cp -a node_modules/@libsql/linux-arm-gnueabihf \
+          /prod/papra-server/node_modules/@libsql/linux-arm-gnueabihf \
+    && node -e "const p=require('/prod/papra-server/node_modules/libsql/package.json'); if (p.version!=='0.5.29') { throw new Error('expected libsql@0.5.29, got '+p.version); }"
+
+# -----------------------------------------------------------------------------
+# Rootful image
+# -----------------------------------------------------------------------------
+FROM runtime-base AS papra-root
+
+ARG PAPRA_VERSION=dev
+ARG GIT_COMMIT=unknown
+ARG BUILD_DATE=unknown
+
+WORKDIR /app
+
+# Build tools are only needed while installing native modules.
+RUN apt-get purge -y --auto-remove python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=papra-deploy /prod/papra-server ./
+COPY --from=papra-build /app/apps/papra-client/dist ./public
+COPY pnpm-workspace.yaml ./
+
+EXPOSE 1221
+
+ENV PAPRA_VERSION=${PAPRA_VERSION} \
+    GIT_COMMIT=${GIT_COMMIT} \
+    BUILD_DATE=${BUILD_DATE} \
+    NODE_ENV=production \
+    SERVER_SERVE_PUBLIC_DIR=true \
+    DATABASE_URL=file:./app-data/db/db.sqlite \
+    DOCUMENT_STORAGE_FILESYSTEM_ROOT=./app-data/documents \
+    PAPRA_CONFIG_DIR=./app-data \
+    EMAILS_DRY_RUN=true \
+    CLIENT_BASE_URL=http://localhost:1221 \
+    BETTER_AUTH_TELEMETRY=0
+
+RUN mkdir -p ./app-data/db ./app-data/documents ./ingestion
+
+CMD ["pnpm", "start:with-migrations"]
+
+# -----------------------------------------------------------------------------
+# Rootless image (default)
+# -----------------------------------------------------------------------------
+FROM runtime-base AS papra-rootless
+
+ARG PAPRA_VERSION=dev
+ARG GIT_COMMIT=unknown
+ARG BUILD_DATE=unknown
+
+RUN apt-get purge -y --auto-remove python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r nonroot && useradd -r -g nonroot nonroot \
+    && mkdir -p /home/nonroot \
+    && chown -R nonroot:nonroot /home/nonroot
+
+WORKDIR /app
+
+RUN mkdir -p ./app-data/db ./app-data/documents \
+    && chown -R nonroot:nonroot /app
+
+USER nonroot
+
+COPY --from=papra-deploy --chown=nonroot:nonroot /prod/papra-server ./
+COPY --from=papra-build --chown=nonroot:nonroot /app/apps/papra-client/dist ./public
+COPY --chown=nonroot:nonroot pnpm-workspace.yaml ./
+
+EXPOSE 1221
+
+ENV PAPRA_VERSION=${PAPRA_VERSION} \
+    GIT_COMMIT=${GIT_COMMIT} \
+    BUILD_DATE=${BUILD_DATE} \
+    NODE_ENV=production \
+    SERVER_SERVE_PUBLIC_DIR=true \
+    DATABASE_URL=file:./app-data/db/db.sqlite \
+    DOCUMENT_STORAGE_FILESYSTEM_ROOT=./app-data/documents \
+    PAPRA_CONFIG_DIR=./app-data \
+    INGESTION_FOLDER_ROOT=./ingestion \
+    EMAILS_DRY_RUN=true \
+    CLIENT_BASE_URL=http://localhost:1221 \
+    BETTER_AUTH_TELEMETRY=0
+
+CMD ["pnpm", "start:with-migrations"]

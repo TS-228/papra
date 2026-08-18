@@ -1,0 +1,88 @@
+name: Build and publish ARMv7 Docker images
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Papra version to tag (e.g. 26.6.1)'
+        required: true
+        type: string
+      node_version:
+        description: 'Node.js version to compile from source'
+        required: false
+        type: string
+        default: '26.7.0'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  docker-armv7:
+    name: Build and publish linux/arm/v7 images
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Capture build metadata
+        id: meta
+        run: |
+          echo "git_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(git show -s --format=%cI HEAD)" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
+        with:
+          platforms: arm
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Build and push rootless ARMv7 image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: ./packages/app/Dockerfile.armv7
+          target: papra-rootless
+          platforms: linux/arm/v7
+          push: true
+          provenance: false
+          build-args: |
+            NODE_VERSION=${{ inputs.node_version }}
+            PAPRA_VERSION=${{ inputs.version }}
+            GIT_COMMIT=${{ steps.meta.outputs.git_commit }}
+            BUILD_DATE=${{ steps.meta.outputs.build_date }}
+          tags: |
+            ${{ steps.meta.outputs.image }}:latest-armv7
+            ${{ steps.meta.outputs.image }}:latest-rootless-armv7
+            ${{ steps.meta.outputs.image }}:${{ inputs.version }}-armv7
+            ${{ steps.meta.outputs.image }}:${{ inputs.version }}-rootless-armv7
+
+      - name: Build and push root ARMv7 image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: ./packages/app/Dockerfile.armv7
+          target: papra-root
+          platforms: linux/arm/v7
+          push: true
+          provenance: false
+          build-args: |
+            NODE_VERSION=${{ inputs.node_version }}
+            PAPRA_VERSION=${{ inputs.version }}
+            GIT_COMMIT=${{ steps.meta.outputs.git_commit }}
+            BUILD_DATE=${{ steps.meta.outputs.build_date }}
+          tags: |
+            ${{ steps.meta.outputs.image }}:latest-root-armv7
+            ${{ steps.meta.outputs.image }}:${{ inputs.version }}-root-armv7

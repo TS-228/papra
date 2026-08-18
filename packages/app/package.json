@@ -13,6 +13,8 @@
     "build:docker:root": "docker build --no-cache -t papra-local-root -f ./Dockerfile ../..",
     "build:docker:root:amd64": "docker buildx build --platform linux/amd64 -t papra-local-root-amd64 -f ./Dockerfile --load ../..",
     "build:docker:root:arm64": "docker buildx build --platform linux/arm64 -t papra-local-root-arm64 -f ./Dockerfile --load ../..",
-    "build:docker:rootless": "docker build --no-cache -t papra-local-rootless -f ./Dockerfile.rootless ../.."
+    "build:docker:root:armv7": "docker buildx build --platform linux/arm/v7 --target papra-root -t papra-local-root-armv7 -f ./Dockerfile.armv7 ../..",
+    "build:docker:rootless": "docker build --no-cache -t papra-local-rootless -f ./Dockerfile.rootless ../..",
+    "build:docker:rootless:armv7": "docker buildx build --platform linux/arm/v7 --target papra-rootless -t papra-local-rootless-armv7 -f ./Dockerfile.armv7 ../.."
   }
 }
