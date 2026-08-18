@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""Make Node's Temporal crate build for both GYP toolsets when cross-compiling.
+"""Split Temporal crate builds so host mksnapshot links i686, Node links armhf.
 
-V8 snapshot tools run on the builder (i686 here) while the Node binary is
-armhf. crates.gyp leaves cargo_rust_target empty on Linux, so cargo gets
-`--target` with no value ("error: target was empty") and writes to
-`obj/gen//release`. Drive cargo from a wrapper that picks the rustc triple
-from GYP's host vs target output directory.
+A single GYP none-target with both toolsets collapsed to one library path
+(obj/gen/release/libnode_crates.a). Host ld then tried to link the armhf
+archive (ELF EM:40) into i686 mksnapshot.
 """
 
 from __future__ import annotations
@@ -13,11 +11,11 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
-UNIX_NODE_CRATES = """
+REPLACEMENT = r"""
     {
-      'target_name': 'node_crates',
+      'target_name': 'node_crates_i686',
       'type': 'none',
-      'toolsets': ['host', 'target'],
+      'toolsets': ['host'],
       'hard_dependency': 1,
       'sources': [
         'Cargo.toml',
@@ -26,25 +24,79 @@ UNIX_NODE_CRATES = """
       ],
       'link_settings': {
         'libraries': [
-          '<(SHARED_INTERMEDIATE_DIR)/release/<(STATIC_LIB_PREFIX)node_crates<(STATIC_LIB_SUFFIX)',
+          '<(PRODUCT_DIR)/libnode_crates_host.a',
         ],
       },
       'actions': [
         {
-          'action_name': 'cargo_build',
+          'action_name': 'cargo_build_i686',
           'inputs': [
             '<@(_sources)'
           ],
           'outputs': [
-            '<(SHARED_INTERMEDIATE_DIR)/release/<(STATIC_LIB_PREFIX)node_crates<(STATIC_LIB_SUFFIX)',
+            '<(PRODUCT_DIR)/libnode_crates_host.a',
           ],
           'action': [
             '/usr/local/bin/build-node-crates.sh',
-            '<(SHARED_INTERMEDIATE_DIR)',
+            'i686-unknown-linux-gnu',
+            '<(PRODUCT_DIR)/libnode_crates_host.a',
           ],
         }
       ],
     },
+    {
+      'target_name': 'node_crates_armhf',
+      'type': 'none',
+      'toolsets': ['target'],
+      'hard_dependency': 1,
+      'sources': [
+        'Cargo.toml',
+        'Cargo.lock',
+        'src/lib.rs',
+      ],
+      'link_settings': {
+        'libraries': [
+          '<(PRODUCT_DIR)/libnode_crates_target.a',
+        ],
+      },
+      'actions': [
+        {
+          'action_name': 'cargo_build_armhf',
+          'inputs': [
+            '<@(_sources)'
+          ],
+          'outputs': [
+            '<(PRODUCT_DIR)/libnode_crates_target.a',
+          ],
+          'action': [
+            '/usr/local/bin/build-node-crates.sh',
+            'arm-unknown-linux-gnueabihf',
+            '<(PRODUCT_DIR)/libnode_crates_target.a',
+          ],
+        }
+      ],
+    },
+    {
+      'target_name': 'node_crates',
+      'type': 'none',
+      'toolsets': ['host', 'target'],
+      'hard_dependency': 1,
+      'sources': [],
+      'target_conditions': [
+        ['_toolset=="host"', {
+          'dependencies': [
+            'node_crates_i686',
+          ],
+        }],
+        ['_toolset=="target"', {
+          'dependencies': [
+            'node_crates_armhf',
+          ],
+        }],
+      ],
+    },
+    {
+      'target_name': 'temporal_capi',
 """
 
 
@@ -54,9 +106,9 @@ def main() -> int:
     start = text.find("    {\n      'target_name': 'node_crates',")
     end = text.find("    {\n      'target_name': 'temporal_capi',")
     if start < 0 or end < 0:
-        raise SystemExit(f"could not find node_crates target in {path}")
-    path.write_text(text[:start] + UNIX_NODE_CRATES.lstrip("\n") + text[end:])
-    print(f"patched {path} to build Temporal crates via build-node-crates.sh")
+        raise SystemExit(f"could not find node_crates/temporal_capi targets in {path}")
+    path.write_text(text[:start] + REPLACEMENT.lstrip("\n") + text[end + len("    {\n      'target_name': 'temporal_capi',"):])
+    print(f"patched {path} with separate i686 host and armhf target crate targets")
     return 0
 
 

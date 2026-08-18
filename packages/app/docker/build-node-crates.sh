@@ -1,18 +1,22 @@
 #!/bin/bash
-# Build Node's vendored temporal_capi staticlib for the current GYP toolset.
-# Host snapshot tools are i686; the Node binary is armhf. Infer the Rust triple
-# from GYP's SHARED_INTERMEDIATE_DIR (obj.host vs obj).
+# Build Node's vendored temporal_capi staticlib for one rustc triple.
+# Args: <rust-target> <output.a>
 set -euo pipefail
 
-target_dir="${1:?SHARED_INTERMEDIATE_DIR required}"
+rust_target="${1:?rust target triple required}"
+output="${2:?output .a path required}"
 
-if [[ "$target_dir" == *obj.host* ]]; then
-  rust_target=i686-unknown-linux-gnu
+if [[ -f /tmp/node/deps/crates/Cargo.toml ]]; then
+  cd /tmp/node/deps/crates
+elif [[ -f Cargo.toml ]]; then
+  :
 else
-  rust_target=arm-unknown-linux-gnueabihf
+  echo "node crates Cargo.toml not found" >&2
+  exit 1
 fi
 
-echo "building node_crates for ${rust_target} in ${target_dir}"
+target_dir="$(dirname "$output")/cargo-${rust_target}"
+echo "building node_crates for ${rust_target} -> ${output}"
 
 cargo rustc \
   --release \
@@ -20,6 +24,6 @@ cargo rustc \
   --frozen \
   --target-dir "$target_dir"
 
-mkdir -p "$target_dir/release"
-ln -sfn "../${rust_target}/release/libnode_crates.a" "$target_dir/release/libnode_crates.a"
-test -f "$target_dir/release/libnode_crates.a"
+mkdir -p "$(dirname "$output")"
+cp -a "${target_dir}/${rust_target}/release/libnode_crates.a" "$output"
+test -f "$output"
