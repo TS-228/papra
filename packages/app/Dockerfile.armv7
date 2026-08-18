@@ -72,6 +72,7 @@ WORKDIR /tmp/node
 
 COPY packages/app/docker/patch-node-crates-cross.py /tmp/patch-node-crates-cross.py
 COPY packages/app/docker/build-node-crates.sh /usr/local/bin/build-node-crates.sh
+COPY packages/app/docker/fix-node-crates-makefiles.py /tmp/fix-node-crates-makefiles.py
 RUN chmod +x /usr/local/bin/build-node-crates.sh
 
 RUN curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.xz" \
@@ -93,7 +94,8 @@ RUN export CC=arm-linux-gnueabihf-gcc \
         --with-arm-float-abi=hard \
         --openssl-no-asm \
         --v8-enable-temporal-support \
-    && grep -E "v8_enable_temporal_support" config.gypi
+    && grep -E "v8_enable_temporal_support" config.gypi \
+    && python3 /tmp/fix-node-crates-makefiles.py /tmp/node/out
 
 RUN export CC=arm-linux-gnueabihf-gcc \
         CXX=arm-linux-gnueabihf-g++ \
