@@ -2,11 +2,10 @@
 """Make Node's Temporal crate build for both GYP toolsets when cross-compiling.
 
 V8 snapshot tools run on the builder (i686 here) while the Node binary is
-armhf. crates.gyp uses a single cargo_rust_target, which is empty on Linux, so
-cargo would emit a host x86_64 library that cannot link into either toolset.
-
-GYP forbids link_settings inside target_conditions, so only the rust triple and
-library path are overridden per toolset.
+armhf. crates.gyp leaves cargo_rust_target empty on Linux, so cargo gets
+`--target` with no value ("error: target was empty") and writes to
+`obj/gen//release`. Drive cargo from a wrapper that picks the rustc triple
+from GYP's host vs target output directory.
 """
 
 from __future__ import annotations
@@ -27,7 +26,7 @@ UNIX_NODE_CRATES = """
       ],
       'link_settings': {
         'libraries': [
-          '<(node_crates_libpath)',
+          '<(SHARED_INTERMEDIATE_DIR)/release/<(STATIC_LIB_PREFIX)node_crates<(STATIC_LIB_SUFFIX)',
         ],
       },
       'actions': [
@@ -37,33 +36,13 @@ UNIX_NODE_CRATES = """
             '<@(_sources)'
           ],
           'outputs': [
-            '<(node_crates_libpath)'
+            '<(SHARED_INTERMEDIATE_DIR)/release/<(STATIC_LIB_PREFIX)node_crates<(STATIC_LIB_SUFFIX)',
           ],
           'action': [
-            '<(cargo)',
-            'rustc',
-            '--release',
-            '--target',
-            '<(cargo_rust_target)',
-            '--frozen',
-            '--target-dir',
+            '/usr/local/bin/build-node-crates.sh',
             '<(SHARED_INTERMEDIATE_DIR)',
           ],
         }
-      ],
-      'target_conditions': [
-        ['_toolset=="host"', {
-          'variables': {
-            'cargo_rust_target': 'i686-unknown-linux-gnu',
-            'node_crates_libpath': '<(SHARED_INTERMEDIATE_DIR)/i686-unknown-linux-gnu/release/<(STATIC_LIB_PREFIX)node_crates<(STATIC_LIB_SUFFIX)',
-          },
-        }],
-        ['_toolset=="target"', {
-          'variables': {
-            'cargo_rust_target': 'arm-unknown-linux-gnueabihf',
-            'node_crates_libpath': '<(SHARED_INTERMEDIATE_DIR)/arm-unknown-linux-gnueabihf/release/<(STATIC_LIB_PREFIX)node_crates<(STATIC_LIB_SUFFIX)',
-          },
-        }],
       ],
     },
 """
@@ -77,7 +56,7 @@ def main() -> int:
     if start < 0 or end < 0:
         raise SystemExit(f"could not find node_crates target in {path}")
     path.write_text(text[:start] + UNIX_NODE_CRATES.lstrip("\n") + text[end:])
-    print(f"patched {path} for i686 host + armhf target Temporal crates")
+    print(f"patched {path} to build Temporal crates via build-node-crates.sh")
     return 0
 
 

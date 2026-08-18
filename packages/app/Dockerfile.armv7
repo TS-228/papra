@@ -71,6 +71,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 WORKDIR /tmp/node
 
 COPY packages/app/docker/patch-node-crates-cross.py /tmp/patch-node-crates-cross.py
+COPY packages/app/docker/build-node-crates.sh /usr/local/bin/build-node-crates.sh
+RUN chmod +x /usr/local/bin/build-node-crates.sh
 
 RUN curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.xz" \
     && tar -xJf "node-v${NODE_VERSION}.tar.xz" --strip-components=1 \
