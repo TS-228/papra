@@ -82,7 +82,7 @@ ARG NODE_VERSION
 ARG PNPM_VERSION
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
+    && apt-get install -y --no-install-recommends ca-certificates curl xz-utils libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
@@ -136,7 +136,16 @@ RUN apt-get update \
 
 COPY --from=node-armv7-build /node-armv7/usr/local /usr/local
 
-RUN npm install -g "pnpm@${PNPM_VERSION}"
+# Cross-compiled Node 26 enables V8 Temporal but does not expose the global.
+# Papra's rate-limit and clock code require globalThis.Temporal.
+RUN npm install -g "pnpm@${PNPM_VERSION}" @js-temporal/polyfill \
+    && printf '%s\n' \
+        "if (typeof globalThis.Temporal === 'undefined') {" \
+        "  globalThis.Temporal = require('@js-temporal/polyfill').Temporal;" \
+        "}" \
+        > /usr/local/lib/node-temporal-polyfill.cjs
+
+ENV NODE_OPTIONS=--require=/usr/local/lib/node-temporal-polyfill.cjs
 
 # -----------------------------------------------------------------------------
 # Install production deps (including native addons) for linux/arm/v7.
@@ -149,8 +158,22 @@ ENV NODE_ENV=production
 
 COPY --from=papra-build /app /app
 
+# libsql 0.4.x (pulled by @libsql/client) has no linux-arm-gnueabihf binary and a
+# different native ABI. Install 0.5.29 outside the workspace (catalog: protocol
+# breaks npm install in the deployed tree) so JS and the armv7 addon match.
 RUN pnpm install --frozen-lockfile --filter="@papra/app-server..." \
-    && pnpm deploy --filter=@papra/app-server --legacy --prod /prod/papra-server
+    && pnpm deploy --filter=@papra/app-server --legacy --prod /prod/papra-server \
+    && mkdir -p /tmp/libsql-arm \
+    && cd /tmp/libsql-arm \
+    && npm init -y \
+    && npm install --omit=dev libsql@0.5.29 @libsql/linux-arm-gnueabihf@0.5.29 \
+    && rm -rf /prod/papra-server/node_modules/libsql \
+              /prod/papra-server/node_modules/@libsql/linux-arm-gnueabihf \
+    && cp -a node_modules/libsql /prod/papra-server/node_modules/libsql \
+    && mkdir -p /prod/papra-server/node_modules/@libsql \
+    && cp -a node_modules/@libsql/linux-arm-gnueabihf \
+          /prod/papra-server/node_modules/@libsql/linux-arm-gnueabihf \
+    && node -e "const p=require('/prod/papra-server/node_modules/libsql/package.json'); if (p.version!=='0.5.29') { throw new Error('expected libsql@0.5.29, got '+p.version); }"
 
 # -----------------------------------------------------------------------------
 # Rootful image
