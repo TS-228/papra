@@ -26,7 +26,11 @@ ARG PNPM_VERSION=11.1.1
 FROM --platform=$BUILDPLATFORM ${DEBIAN_BUILD_IMAGE} AS node-armv7-build
 ARG NODE_VERSION
 
-RUN apt-get update \
+# gcc-arm-linux-gnueabihf conflicts with gcc-multilib on Debian Trixie, so
+# 32-bit V8 host tools are built with the i686 cross compiler instead of gcc -m32.
+# i386 libs are required to run those host snapshot tools on the amd64 builder.
+RUN dpkg --add-architecture i386 \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
@@ -34,9 +38,11 @@ RUN apt-get update \
         g++ \
         gcc-arm-linux-gnueabihf \
         g++-arm-linux-gnueabihf \
-        gcc-multilib \
-        g++-multilib \
-        libc6-dev-i386 \
+        gcc-i686-linux-gnu \
+        g++-i686-linux-gnu \
+        libc6:i386 \
+        libstdc++6:i386 \
+        zlib1g:i386 \
         make \
         python3 \
         python-is-python3 \
@@ -51,8 +57,8 @@ RUN curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.
 
 RUN export CC=arm-linux-gnueabihf-gcc \
         CXX=arm-linux-gnueabihf-g++ \
-        CC_host="gcc -m32" \
-        CXX_host="g++ -m32" \
+        CC_host=i686-linux-gnu-gcc \
+        CXX_host=i686-linux-gnu-g++ \
         AR=arm-linux-gnueabihf-ar \
         RANLIB=arm-linux-gnueabihf-ranlib \
     && ./configure \
@@ -61,11 +67,12 @@ RUN export CC=arm-linux-gnueabihf-gcc \
         --dest-os=linux \
         --cross-compiling \
         --with-arm-float-abi=hard \
-        --with-arm-fpu=neon \
         --openssl-no-asm \
-    && make -j"$(nproc)" \
-    && make install DESTDIR=/node-armv7 \
-    && arm-linux-gnueabihf-strip /node-armv7/usr/local/bin/node || true
+    && make -j"$(nproc)"
+
+RUN make install DESTDIR=/node-armv7
+RUN arm-linux-gnueabihf-strip /node-armv7/usr/local/bin/node
+
 
 # -----------------------------------------------------------------------------
 # Official linux-x64 Node 26 on Debian Trixie, used only to compile Papra JS.
