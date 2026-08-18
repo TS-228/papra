@@ -29,6 +29,8 @@ ARG NODE_VERSION
 # gcc-arm-linux-gnueabihf conflicts with gcc-multilib on Debian Trixie, so
 # 32-bit V8 host tools are built with the i686 cross compiler instead of gcc -m32.
 # i386 libs are required to run those host snapshot tools on the amd64 builder.
+# Node 26 Temporal (temporal_capi) needs rustc/cargo >= 1.86; Trixie's rustc is
+# 1.85, so install rustup. Host snapshot tools are i686, the Node binary is armhf.
 RUN dpkg --add-architecture i386 \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -44,16 +46,36 @@ RUN dpkg --add-architecture i386 \
         libstdc++6:i386 \
         zlib1g:i386 \
         make \
+        pkg-config \
         python3 \
         python-is-python3 \
         xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
+ENV PATH="/root/.cargo/bin:${PATH}" \
+    CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc \
+    CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER=i686-linux-gnu-gcc
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain stable \
+    && rustup target add i686-unknown-linux-gnu arm-unknown-linux-gnueabihf \
+    && printf '%s\n' \
+        '[target.arm-unknown-linux-gnueabihf]' \
+        'linker = "arm-linux-gnueabihf-gcc"' \
+        '' \
+        '[target.i686-unknown-linux-gnu]' \
+        'linker = "i686-linux-gnu-gcc"' \
+        >> /root/.cargo/config.toml \
+    && rustc --version && cargo --version
+
 WORKDIR /tmp/node
+
+COPY packages/app/docker/patch-node-crates-cross.py /tmp/patch-node-crates-cross.py
 
 RUN curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.xz" \
     && tar -xJf "node-v${NODE_VERSION}.tar.xz" --strip-components=1 \
-    && rm "node-v${NODE_VERSION}.tar.xz"
+    && rm "node-v${NODE_VERSION}.tar.xz" \
+    && python3 /tmp/patch-node-crates-cross.py /tmp/node/deps/crates/crates.gyp
 
 RUN export CC=arm-linux-gnueabihf-gcc \
         CXX=arm-linux-gnueabihf-g++ \
@@ -68,6 +90,15 @@ RUN export CC=arm-linux-gnueabihf-gcc \
         --cross-compiling \
         --with-arm-float-abi=hard \
         --openssl-no-asm \
+        --v8-enable-temporal-support \
+    && grep -E "v8_enable_temporal_support" config.gypi
+
+RUN export CC=arm-linux-gnueabihf-gcc \
+        CXX=arm-linux-gnueabihf-g++ \
+        CC_host=i686-linux-gnu-gcc \
+        CXX_host=i686-linux-gnu-g++ \
+        AR=arm-linux-gnueabihf-ar \
+        RANLIB=arm-linux-gnueabihf-ranlib \
     && make -j"$(nproc)"
 
 RUN make install DESTDIR=/node-armv7
@@ -136,16 +167,7 @@ RUN apt-get update \
 
 COPY --from=node-armv7-build /node-armv7/usr/local /usr/local
 
-# Cross-compiled Node 26 enables V8 Temporal but does not expose the global.
-# Papra's rate-limit and clock code require globalThis.Temporal.
-RUN npm install -g "pnpm@${PNPM_VERSION}" @js-temporal/polyfill \
-    && printf '%s\n' \
-        "if (typeof globalThis.Temporal === 'undefined') {" \
-        "  globalThis.Temporal = require('@js-temporal/polyfill').Temporal;" \
-        "}" \
-        > /usr/local/lib/node-temporal-polyfill.cjs
-
-ENV NODE_OPTIONS=--require=/usr/local/lib/node-temporal-polyfill.cjs
+RUN npm install -g "pnpm@${PNPM_VERSION}"
 
 # -----------------------------------------------------------------------------
 # Install production deps (including native addons) for linux/arm/v7.
