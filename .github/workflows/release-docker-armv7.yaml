@@ -1,38 +1,218 @@
 name: Build and publish ARMv7 Docker images
 
+# Builds the latest Papra app release for linux/arm/v7.
+# Node.js no longer ships official armv7 binaries; the runtime uses
+# ghcr.io/ts-228/unofficial-builds/node-armv7l (Debian slim).
+
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Papra version to tag (e.g. 26.6.1)'
-        required: true
-        type: string
-      node_version:
-        description: 'Node.js version to compile from source'
+        description: 'Papra app version to build (e.g. 26.6.1). Empty = latest @papra/app GitHub release.'
         required: false
         type: string
-        default: '26.7.0'
+        default: ''
+      source:
+        description: 'Papra source to package'
+        required: false
+        type: choice
+        options:
+          - latest-release
+          - this-repo
+        default: latest-release
+      node_image:
+        description: 'Unofficial linux/arm/v7 Node base image'
+        required: false
+        type: string
+        default: 'ghcr.io/ts-228/unofficial-builds/node-armv7l:latest'
+      force:
+        description: 'Rebuild even if this Papra version is already published'
+        required: false
+        type: boolean
+        default: true
+  schedule:
+    # Daily: pick up new papra-hq/papra releases. Sunday also refreshes
+    # the image against the latest unofficial Node/Debian base.
+    - cron: '0 4 * * *'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/app/Dockerfile.armv7'
+      - '.github/workflows/release-docker-armv7.yaml'
+      - 'packages/app/build-armv7.sh'
+  pull_request:
+    paths:
+      - 'packages/app/Dockerfile.armv7'
+      - '.github/workflows/release-docker-armv7.yaml'
+      - 'packages/app/build-armv7.sh'
+  repository_dispatch:
+    types: [rebuild-armv7]
+
+concurrency:
+  group: release-docker-armv7
+  cancel-in-progress: false
 
 permissions:
   contents: read
   packages: write
+  actions: write # GitHub Actions cache for docker/build-push-action
 
 jobs:
-  docker-armv7:
-    name: Build and publish linux/arm/v7 images
+  resolve:
+    name: Resolve Papra release
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+      source_repo: ${{ steps.pick.outputs.source_repo }}
+      source_ref: ${{ steps.pick.outputs.source_ref }}
+      node_image: ${{ steps.pick.outputs.node_image }}
+      image: ${{ steps.pick.outputs.image }}
+      should_build: ${{ steps.pick.outputs.should_build }}
+      skip_reason: ${{ steps.pick.outputs.skip_reason }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
-      - name: Capture build metadata
+      - name: Resolve latest @papra/app release
+        id: pick
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_SOURCE: ${{ inputs.source }}
+          INPUT_NODE_IMAGE: ${{ inputs.node_image }}
+          INPUT_FORCE: ${{ inputs.force }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          REPO_LC="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          IMAGE="ghcr.io/${REPO_LC}"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+
+          NODE_IMAGE="${INPUT_NODE_IMAGE:-ghcr.io/ts-228/unofficial-builds/node-armv7l:latest}"
+          echo "node_image=${NODE_IMAGE}" >> "$GITHUB_OUTPUT"
+
+          SOURCE="${INPUT_SOURCE:-latest-release}"
+          FORCE="${INPUT_FORCE:-false}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] || [ "$EVENT_NAME" = "push" ] || [ "$EVENT_NAME" = "repository_dispatch" ]; then
+            # Manual / Dockerfile changes always publish.
+            FORCE=true
+          fi
+
+          latest_papra_tag() {
+            gh api repos/papra-hq/papra/releases --jq '
+              [.[] | select(.tag_name | startswith("@papra/app@"))]
+              | first
+              | .tag_name // empty
+            '
+          }
+
+          case "$SOURCE" in
+            this-repo)
+              echo "source_repo=${{ github.repository }}" >> "$GITHUB_OUTPUT"
+              echo "source_ref=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+              if [ -n "${INPUT_VERSION}" ]; then
+                VERSION="${INPUT_VERSION}"
+              else
+                VERSION="$(python3 -c 'import json; print(json.load(open("packages/app/package.json"))["version"])')"
+              fi
+              ;;
+            latest-release|*)
+              if [ -n "${INPUT_VERSION}" ]; then
+                VERSION="${INPUT_VERSION}"
+                TAG="@papra/app@${VERSION}"
+              else
+                TAG="$(latest_papra_tag)"
+                if [ -z "$TAG" ]; then
+                  echo "Could not resolve @papra/app release from papra-hq/papra" >&2
+                  exit 1
+                fi
+                VERSION="${TAG#@papra/app@}"
+              fi
+              if ! gh api "repos/papra-hq/papra/git/refs/tags/${TAG}" >/dev/null 2>&1; then
+                echo "Tag ${TAG} not found on papra-hq/papra" >&2
+                exit 1
+              fi
+              echo "source_repo=papra-hq/papra" >> "$GITHUB_OUTPUT"
+              echo "source_ref=${TAG}" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved Papra ${VERSION} from ${SOURCE} (force=${FORCE})"
+
+          SHOULD_BUILD=true
+          SKIP_REASON=
+
+          if [ "$FORCE" != "true" ]; then
+            WEEKDAY="$(date -u +%u)"
+            TOKEN="$(curl -fsSL -u "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+              "https://ghcr.io/token?service=ghcr.io&scope=repository:${REPO_LC}:pull" \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+            STATUS="$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+              "https://ghcr.io/v2/${REPO_LC}/manifests/${VERSION}-armv7")"
+            if [ "$STATUS" = "200" ] && [ "$WEEKDAY" != "7" ]; then
+              SHOULD_BUILD=false
+              SKIP_REASON="ghcr.io/${REPO_LC}:${VERSION}-armv7 already exists (Sunday rebuilds still refresh the Node/Debian base)"
+            fi
+          fi
+
+          echo "should_build=${SHOULD_BUILD}" >> "$GITHUB_OUTPUT"
+          echo "skip_reason=${SKIP_REASON}" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        run: |
+          {
+            echo "## Resolve"
+            echo ""
+            echo "- Papra: \`${{ steps.pick.outputs.version }}\`"
+            echo "- Source: \`${{ steps.pick.outputs.source_repo }} (${{ steps.pick.outputs.source_ref }})\`"
+            echo "- Node image: \`${{ steps.pick.outputs.node_image }}\`"
+            echo "- Publish to: \`${{ steps.pick.outputs.image }}\`"
+            echo "- Build: \`${{ steps.pick.outputs.should_build }}\`"
+            if [ -n "${{ steps.pick.outputs.skip_reason }}" ]; then
+              echo "- Skip: ${{ steps.pick.outputs.skip_reason }}"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  docker-armv7:
+    name: Build and publish linux/arm/v7 images
+    needs: resolve
+    if: needs.resolve.outputs.should_build == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout ARMv7 Dockerfile
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+          path: armv7-ci
+
+      - name: Checkout Papra source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: ${{ needs.resolve.outputs.source_repo }}
+          ref: ${{ needs.resolve.outputs.source_ref }}
+          persist-credentials: false
+          path: papra
+
+      - name: Overlay ARMv7 Dockerfile and capture metadata
         id: meta
         run: |
-          echo "git_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "build_date=$(git show -s --format=%cI HEAD)" >> "$GITHUB_OUTPUT"
-          echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          cp armv7-ci/packages/app/Dockerfile.armv7 papra/packages/app/Dockerfile.armv7
+          PNPM_VERSION="$(python3 -c 'import json; print(json.load(open("papra/package.json"))["packageManager"].split("@",1)[1])')"
+          {
+            echo "pnpm_version=${PNPM_VERSION}"
+            echo "git_commit=$(git -C papra rev-parse HEAD)"
+            echo "build_date=$(git -C papra show -s --format=%cI HEAD)"
+          } >> "$GITHUB_OUTPUT"
+          echo "Using pnpm@${PNPM_VERSION}"
+          git -C papra log -1 --oneline
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
@@ -52,37 +232,69 @@ jobs:
       - name: Build and push rootless ARMv7 image
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
-          context: .
-          file: ./packages/app/Dockerfile.armv7
+          context: papra
+          file: papra/packages/app/Dockerfile.armv7
           target: papra-rootless
           platforms: linux/arm/v7
           push: true
+          pull: true
           provenance: false
           build-args: |
-            NODE_VERSION=${{ inputs.node_version }}
-            PAPRA_VERSION=${{ inputs.version }}
+            NODE_IMAGE=${{ needs.resolve.outputs.node_image }}
+            PNPM_VERSION=${{ steps.meta.outputs.pnpm_version }}
+            PAPRA_VERSION=${{ needs.resolve.outputs.version }}
             GIT_COMMIT=${{ steps.meta.outputs.git_commit }}
             BUILD_DATE=${{ steps.meta.outputs.build_date }}
           tags: |
-            ${{ steps.meta.outputs.image }}:latest-armv7
-            ${{ steps.meta.outputs.image }}:latest-rootless-armv7
-            ${{ steps.meta.outputs.image }}:${{ inputs.version }}-armv7
-            ${{ steps.meta.outputs.image }}:${{ inputs.version }}-rootless-armv7
+            ${{ needs.resolve.outputs.image }}:latest-armv7
+            ${{ needs.resolve.outputs.image }}:latest-rootless-armv7
+            ${{ needs.resolve.outputs.image }}:${{ needs.resolve.outputs.version }}-armv7
+            ${{ needs.resolve.outputs.image }}:${{ needs.resolve.outputs.version }}-rootless-armv7
+          cache-from: type=gha,scope=papra-armv7
+          cache-to: type=gha,mode=max,scope=papra-armv7
 
       - name: Build and push root ARMv7 image
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
-          context: .
-          file: ./packages/app/Dockerfile.armv7
+          context: papra
+          file: papra/packages/app/Dockerfile.armv7
           target: papra-root
           platforms: linux/arm/v7
           push: true
+          pull: true
           provenance: false
           build-args: |
-            NODE_VERSION=${{ inputs.node_version }}
-            PAPRA_VERSION=${{ inputs.version }}
+            NODE_IMAGE=${{ needs.resolve.outputs.node_image }}
+            PNPM_VERSION=${{ steps.meta.outputs.pnpm_version }}
+            PAPRA_VERSION=${{ needs.resolve.outputs.version }}
             GIT_COMMIT=${{ steps.meta.outputs.git_commit }}
             BUILD_DATE=${{ steps.meta.outputs.build_date }}
           tags: |
-            ${{ steps.meta.outputs.image }}:latest-root-armv7
-            ${{ steps.meta.outputs.image }}:${{ inputs.version }}-root-armv7
+            ${{ needs.resolve.outputs.image }}:latest-root-armv7
+            ${{ needs.resolve.outputs.image }}:${{ needs.resolve.outputs.version }}-root-armv7
+          cache-from: type=gha,scope=papra-armv7
+          cache-to: type=gha,mode=max,scope=papra-armv7
+
+      - name: Inspect published image
+        run: |
+          set -euo pipefail
+          IMAGE="${{ needs.resolve.outputs.image }}:${{ needs.resolve.outputs.version }}-armv7"
+          docker buildx imagetools inspect "$IMAGE"
+
+      - name: Summary
+        run: |
+          {
+            echo "## Published"
+            echo ""
+            echo "- Papra: \`${{ needs.resolve.outputs.version }}\`"
+            echo "- Source: \`${{ needs.resolve.outputs.source_repo }} (${{ needs.resolve.outputs.source_ref }})\`"
+            echo "- Node: \`${{ needs.resolve.outputs.node_image }}\`"
+            echo "- Platform: \`linux/arm/v7\`"
+            echo ""
+            echo '```'
+            echo "docker pull ${{ needs.resolve.outputs.image }}:${{ needs.resolve.outputs.version }}-armv7"
+            echo "docker run --platform linux/arm/v7 --rm -p 1221:1221 \\"
+            echo "  -e AUTH_SECRET=change-me \\"
+            echo "  ${{ needs.resolve.outputs.image }}:latest-armv7"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
