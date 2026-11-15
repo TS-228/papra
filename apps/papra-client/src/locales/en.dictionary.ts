@@ -424,6 +424,18 @@ export const translations = {
   'documents.actions.cancel': 'Cancel',
   'documents.actions.save': 'Save',
   'documents.actions.saving': 'Saving...',
+  'documents.reprocess.action': 'Reprocess document',
+  'documents.reprocess.confirm.title': 'Reprocess document?',
+  'documents.reprocess.confirm.description':
+    'The content of the document will be re-extracted and the tagging rules will be re-applied. Manual changes to the content will be lost. The operation is done in the background and may take a few minutes to complete.',
+  'documents.reprocess.confirm.submit': 'Reprocess',
+  'documents.reprocess.queued': 'Document reprocessing queued',
+  'documents.reprocess.queued.description':
+    'Processing runs in the background, it may take a few minutes to complete, refresh to see the updated content.',
+  'documents.reprocess.error': 'Failed to queue document reprocessing. Please try again.',
+  'documents.reprocess.rate-limited':
+    'Your organization has reached the reprocessing limit. Please try again later.',
+  'documents.reprocess.disabled': 'Document reprocessing is disabled on this server.',
   'documents.content.alert':
     'The content of the document is automatically extracted from the document on upload. It is only used for search and indexing purposes.',
   'documents.content.empty-placeholder':
@@ -569,6 +581,18 @@ export const translations = {
   'documents.pdf-viewer.toolbar.rotate-clockwise': 'Rotate clockwise',
   'documents.pdf-viewer.toolbar.download': 'Download',
   'documents.pdf-viewer.toolbar.print': 'Print',
+
+  'documents.pdf-viewer.search.label': 'Search document',
+  'documents.pdf-viewer.search.placeholder': 'Find in document...',
+  'documents.pdf-viewer.search.previous': 'Previous match (Shift+Enter)',
+  'documents.pdf-viewer.search.next': 'Next match (Enter)',
+  'documents.pdf-viewer.search.close': 'Close search (Escape)',
+  'documents.pdf-viewer.search.searching': 'Searching...',
+  'documents.pdf-viewer.search.no-matches': 'No matches',
+  'documents.pdf-viewer.search.matches': '{{current}} of {{total}}',
+  'documents.pdf-viewer.search.match-case': 'Match case',
+  'documents.pdf-viewer.search.whole-words': 'Whole words',
+  'documents.pdf-viewer.search.highlight-all': 'Highlight all matches',
 
   'documents.pdf-viewer.zoom.zoom-out': 'Zoom out',
   'documents.pdf-viewer.zoom.zoom-in': 'Zoom in',
@@ -1325,6 +1349,17 @@ export const translations = {
   'admin.organization-detail.stats.deleted-storage': 'Deleted Storage',
   'admin.organization-detail.stats.total-documents': 'Total Documents',
   'admin.organization-detail.stats.total-storage': 'Total Storage',
+  'admin.organization-detail.delete.title': 'Delete organization',
+  'admin.organization-detail.delete.description':
+    'Remove all members and invitations and schedule this organization and its documents for permanent deletion.',
+  'admin.organization-detail.delete.button': 'Delete organization',
+  'admin.organization-detail.delete.confirm.title': 'Delete organization?',
+  'admin.organization-detail.delete.confirm.message':
+    'Are you sure you want to delete "{{ name }}"? All members will lose access immediately and pending invitations will be removed. The organization and its documents will be scheduled for permanent deletion.',
+  'admin.organization-detail.delete.confirm.cancel-button': 'Cancel',
+  'admin.organization-detail.delete.has-active-subscription':
+    'This organization has an active subscription. Cancel it or schedule its cancellation before deleting the organization.',
+  'admin.organization-detail.delete.success': 'Organization deleted successfully.',
 
   'admin.users.title': 'User Management',
   'admin.users.description': 'Manage and view all users in the system',
